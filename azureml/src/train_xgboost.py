@@ -1,23 +1,22 @@
 import mlflow
-import mlflow.sklearn
+import mlflow.xgboost
 import pandas as pd
 from argparse import ArgumentParser
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
 from sklearn.metrics import *
 
 
 parser = ArgumentParser()
-
 parser.add_argument(
     '--data',
     type=str,
-    required=True)
+    required=True
+)
 
 args = parser.parse_args()
 
 print(f'Input data path: {args.data}')
+
 
 feature_columns = [
     'amount',
@@ -43,8 +42,6 @@ columns_to_read = (
 df = pd.read_parquet(path=args.data,
                      columns=columns_to_read)
 
-print("Total rows:", len(df))
-
 train_df = df[df['dataset_split']=='train'].copy()
 
 validation_df = df[df['dataset_split']=='validation'].copy()
@@ -59,28 +56,47 @@ y_train = train_df['is_fraud']
 X_validation = validation_df[feature_columns]
 y_validation = validation_df['is_fraud']
 
-model = Pipeline(
-    [
-        ('scaler',StandardScaler()),
-        ('classifier', LogisticRegression(
-            class_weight='balanced',
-            max_iter=1000
-        ))
-    ]
+
+negative_count = (y_train == 0).sum()
+positive_count = (y_train == 1).sum()
+
+scale_pos_weight = (
+    negative_count / positive_count
 )
 
-mlflow.start_run() #important to start before autolog to avoid 2 jobs insted of 1
-mlflow.sklearn.autolog()
-
-model.fit(X_train,y_train)
-
-validation_probability = model.predict_proba(
-    X_validation
-)[:,1]
-
-validation_prediction = model.predict(
-    X_validation
+print(
+    "scale_pos_weight:",
+    scale_pos_weight
 )
+
+model = XGBClassifier(
+    objective="binary:logistic",
+    n_estimators=300,
+    max_depth=6,
+    learning_rate=0.1,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    scale_pos_weight=scale_pos_weight,
+    tree_method="hist",
+    eval_metric="aucpr",
+    random_state=42,
+    n_jobs=-1
+)
+
+mlflow.start_run()
+mlflow.xgboost.autolog()
+
+model.fit(X_train,
+          y_train,
+          eval_set=[
+            (X_validation,y_validation)
+          ],
+          verbose=True
+        )
+
+validation_probability = model.predict_proba(X_validation)[:,1]
+
+validation_prediction = model.predict(X_validation)
 
 pr_auc = average_precision_score(y_validation,validation_probability)
 
@@ -92,8 +108,7 @@ recall = recall_score(y_validation,validation_prediction,zero_division=0)
 
 f1 = f1_score(y_validation,validation_prediction,zero_division=0)
 
-tn,fp,fn,tp = confusion_matrix(y_validation,validation_prediction).ravel()
-
+tn, fp, fn, tp = confusion_matrix(y_validation,validation_prediction).ravel()
 
 mlflow.log_metrics({
     "validation_pr_auc": pr_auc,
@@ -108,7 +123,7 @@ mlflow.log_metrics({
     "validation_false_negative": int(fn)
 })
 
-print("\n\n----- Logistic Regression Baseline -----")
+print("\n\n----- XGBoost Baseline -----")
 
 print("Validation PR-AUC    :", pr_auc)
 print("Validation ROC-AUC   :", roc_auc)
